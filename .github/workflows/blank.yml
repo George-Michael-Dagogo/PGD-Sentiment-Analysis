@@ -1,0 +1,58 @@
+# Collects new articles every 6 hours from Punch, The Guardian, Premium Times,
+# ThisDay and Daily Trust (Vanguard is left out) and saves them to Supabase.
+#
+# Setup (once):
+#   1. Push this folder to a GitHub repository (private is fine).
+#   2. Repository -> Settings -> Secrets and variables -> Actions -> New repository secret:
+#        SUPABASE_URL  = https://YOUR-PROJECT-REF.supabase.co
+#        SUPABASE_KEY  = your secret / service_role key
+#   3. Actions tab -> "Scrape news" -> "Run workflow" once to test it.
+#
+# Each run samples the last 2 complete days (yesterday and the day before, Lagos time)
+# with the same 30-per-outlet-per-day rule as the historical data. Re-runs are safe:
+# already-queued articles are skipped, so a day is only ever sampled once.
+
+name: Scrape news
+
+on:
+  schedule:
+    # UTC times: 00:17, 06:17, 12:17, 18:17 = 01:17, 07:17, 13:17, 19:17 in Lagos.
+    # GitHub can start scheduled runs a little late at busy times.
+    - cron: "17 */6 * * *"
+  workflow_dispatch: {}   # adds a "Run workflow" button for manual runs
+
+concurrency:
+  group: scrape-news      # never two runs at once (they'd double the request rate)
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      OUTLETS: punch,guardian,premiumtimes,thisday,dailytrust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Find articles from the last 2 complete days
+        run: python ng_news_pipeline.py discover --last-days 2 --max-per-day 30 --outlets "$OUTLETS"
+
+      - name: Fetch them into Supabase
+        # --last-days 3: only recent articles, so this never competes with a
+        # historical crawl you run yourself. --no-stealth: no browser on GitHub's
+        # machines; a page that fails is retried on the next run.
+        run: python ng_news_pipeline.py crawl --last-days 3 --max-minutes 60 --no-stealth --outlets "$OUTLETS"
+
+      - name: Progress
+        if: always()
+        run: python ng_news_pipeline.py status
